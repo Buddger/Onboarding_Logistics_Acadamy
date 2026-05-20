@@ -4110,11 +4110,17 @@ function KpiSimulatorModule() {
 
   const [scenario, setScenario] = useState("backorder");
 
-  // KPI window boundaries
-  const SDPA_WINDOW_END = d0h(14);   // 14:00 Day 0
+  // KPI window boundaries and scenario flags
+  const CUTOFF          = d0h(14);   // 14:00 Day 0
+  const SDPA_WINDOW_END = CUTOFF;
   const DEPARTURE       = d0h(18);   // 18:00 Day 0
+  const DAY1_DEPARTURE  = d1h(18);   // 18:00 Day 1
   const DAY1_END        = 9;         // 23:59 Day 1
   const DAY2_END        = 11;        // 23:59 Day 2
+
+  const isBackOrder = scenario === "backorder";
+  const isNextDay   = scenario === "nextday";
+  const isStandard  = scenario === "standard";
 
   // State in integer steps of 0.5h = 30min (×2)
   // Inbound: 06:00–20:00 Day 0 (slider range wider than window)
@@ -4134,39 +4140,40 @@ function KpiSimulatorModule() {
   const pp         = fromInt(effPgiI);
   const pod        = fromInt(podI);
 
-  // ─────────────────────────────────────────────────────
-  // Scenario KPI Logic
-  // ─────────────────────────────────────────────────────
-
+  // KPI status per scenario
   let sdpaFail = false;
   let wspFail = false;
   let pgiAfterDeparture = false;
+  let cteWindowStart = DEPARTURE;
   let cteWindowEnd = DAY1_END;
 
   if (isBackOrder) {
     sdpaFail = ip >= CUTOFF;
     wspFail = pp >= DEPARTURE;
     pgiAfterDeparture = pp >= DEPARTURE;
+    cteWindowStart = DEPARTURE;
     cteWindowEnd = pgiAfterDeparture ? DAY2_END : DAY1_END;
   }
 
   if (isNextDay) {
     const createdBeforeCutoff = ip <= CUTOFF;
-
     if (createdBeforeCutoff) {
       wspFail = pp >= DEPARTURE;
       pgiAfterDeparture = pp >= DEPARTURE;
+      cteWindowStart = DEPARTURE;
       cteWindowEnd = pgiAfterDeparture ? DAY2_END : DAY1_END;
     } else {
-      wspFail = pp >= d1h(18);
-      pgiAfterDeparture = pp >= d1h(18);
+      wspFail = pp >= DAY1_DEPARTURE;
+      pgiAfterDeparture = pp >= DAY1_DEPARTURE;
+      cteWindowStart = DAY1_DEPARTURE;
       cteWindowEnd = DAY2_END;
     }
   }
 
   if (isStandard) {
-    wspFail = pp >= d1h(18);
-    pgiAfterDeparture = pp >= d1h(18);
+    wspFail = pp >= DAY1_DEPARTURE;
+    pgiAfterDeparture = pp >= DAY1_DEPARTURE;
+    cteWindowStart = DAY1_DEPARTURE;
     cteWindowEnd = DAY2_END;
   }
 
@@ -4199,9 +4206,12 @@ function KpiSimulatorModule() {
 
   const THRESHOLDS = [
     { pos: SDPA_WINDOW_END, color: T.amber,   style: "dashed", icon: "⏰", label: "14:00 Cutoff",  stagger: 0 },
-    { pos: DEPARTURE,       color: "#e65100", style: "dashed", icon: "🚛", label: "18:00 Departure", stagger: 1 },
+    { pos: DEPARTURE,       color: "#e65100", style: "dashed", icon: "🚛", label: "18:00 Day 0 Departure", stagger: 1 },
     { pos: 6,               color: "#7c3aed", style: "solid",  icon: "🕛", label: "Day 1 begins",  stagger: 0 },
-    ...(pgiAfterDeparture ? [
+    ...(!isBackOrder ? [
+      { pos: DAY1_DEPARTURE, color: "#e65100", style: "dashed", icon: "🚛", label: "18:00 Day 1 Departure", stagger: 1 },
+    ] : []),
+    ...(pgiAfterDeparture || !isBackOrder ? [
       { pos: 9,             color: "#1565c0", style: "solid",  icon: "🕛", label: "Day 2 begins",  stagger: 1 },
     ] : []),
   ];
@@ -4210,35 +4220,41 @@ function KpiSimulatorModule() {
 
   const KPI_DEFS = [
     {
-      id: "SDPA", icon: "🚛", color: "#0097a7", label: scenario === "backorder" ? "Inbound Scan" : "Delivery Note Creation",
-      from: d0h(6), to: SDPA_WINDOW_END,
+      id: isBackOrder ? "SDPA" : "DNC", icon: "🚛", color: "#0097a7", label: isBackOrder ? "Inbound Scan" : "Delivery Note Creation",
+      from: d0h(6), to: isBackOrder || isNextDay ? SDPA_WINDOW_END : DAY1_DEPARTURE,
       dotPos: ip, fail: sdpaFail,
       dotLabel: posToTime(ip),
-      statusNote: sdpaFail ? "After 14:00 cutoff — SDPA fails" : "Before 14:00 ✓",
+      statusNote: isBackOrder
+        ? (sdpaFail ? "After 14:00 cutoff — SDPA fails" : "Before 14:00 ✓")
+        : isNextDay
+          ? (ip <= CUTOFF ? "Created before 14:00 — Day 0 WSP target" : "Created after 14:00 — WSP window until Day 1 18:00")
+          : "Today Can Order — WSP window until Day 1 18:00",
     },
     {
       id: "WSP",  icon: "✅", color: "#7c3aed", label: "PGI Scan",
-      from: d0h(8), to: DEPARTURE,
+      from: d0h(8), to: isBackOrder || (isNextDay && ip <= CUTOFF) ? DEPARTURE : DAY1_DEPARTURE,
       dotPos: pp, fail: wspFail, clamped: pgiClamped,
       dotLabel: posToTime(pp),
       statusNote: wspFail
-        ? scenario === "backorder"
+        ? isBackOrder
           ? "After 18:00 Day 0 departure — WSP fails"
-          : scenario === "nextday"
-            ? "Missed valid departure window — WSP fails"
-            : "After Day 1 departure — WSP fails"
+          : "After valid WSP departure window — WSP fails"
         : pgiClamped
-          ? `⏱ 3h cycle time — earliest: ${posToTime(ip + THROUGHPUT)}`
-          : "Before 18:00 departure ✓",
+          ? `⏱ 3h pick-pack time until loading from delivery creation on — earliest: ${posToTime(ip + THROUGHPUT)}`
+          : isBackOrder || (isNextDay && ip <= CUTOFF)
+            ? "Before Day 0 18:00 departure ✓"
+            : "Before Day 1 18:00 departure ✓",
     },
     {
       id: "CTE",  icon: "📍", color: "#e65100", label: "POD Delivery",
-      from: DEPARTURE, to: cteWindowEnd,
+      from: cteWindowStart, to: cteWindowEnd,
       dotPos: pod, fail: cteFail,
       dotLabel: posToTime(pod),
-      statusNote: pgiAfterDeparture
-        ? cteFail ? "After Day 2 23:59 — CTE fails" : "+24h window applied ✓ (PGI missed departure)"
-        : cteFail ? "After Day 1 23:59 — CTE fails" : "Within Day 1 window ✓",
+      statusNote: cteWindowStart === DAY1_DEPARTURE
+        ? cteFail ? "After Day 2 23:59 — CTE fails" : "CTE starts from Day 1 departure ✓"
+        : pgiAfterDeparture
+          ? cteFail ? "After Day 2 23:59 — CTE fails" : "+24h window applied ✓ (PGI missed departure)"
+          : cteFail ? "After Day 1 23:59 — CTE fails" : "CTE starts from Day 0 departure ✓",
     },
   ];
 
@@ -4285,7 +4301,7 @@ function KpiSimulatorModule() {
     const dotIcon   = kd.fail ? "✗" : "✓";
     const statusBg  = kd.fail ? T.redLight   : T.greenLight;
     const statusBrd = kd.fail ? T.redBorder  : T.greenBorder;
-    const isCteLate = kd.id === "CTE" && pgiAfterDeparture;
+    const isCteLate = kd.id === "CTE" && (pgiAfterDeparture || cteWindowStart === DAY1_DEPARTURE);
 
     return (
       <div style={{ display: "flex", alignItems: "stretch", overflow: "hidden", borderRadius: "var(--radius-md)", border: `1px solid ${T.border}`, background: T.surface, marginBottom: 4 }}>
@@ -4368,9 +4384,9 @@ function KpiSimulatorModule() {
   const INBOUND_MIN = toInt(d0h(6));   // 06:00
   const INBOUND_MAX = toInt(d0h(20));  // 20:00 — wider than 14:00 window so dot can go outside
   const PGI_MIN     = toInt(d0h(8));   // 08:00
-  const PGI_MAX     = toInt(d0h(23));  // 23:00 — wider than 18:00 window
+  const PGI_MAX     = toInt(isBackOrder ? d0h(23) : d1h(23));  // wider than the active WSP window
   const POD_MIN     = toInt(d1h(0));   // Day 1 00:00
-  const POD_MAX     = toInt(pgiAfterDeparture ? d2h(23) : d1h(23)); // Day 1 or Day 2 23:00
+  const POD_MAX     = toInt((pgiAfterDeparture || cteWindowStart === DAY1_DEPARTURE) ? d2h(23) : d1h(23)); // Day 1 or Day 2 23:00
 
   return (
     <div style={{ minHeight: "calc(100vh - 56px)", background: T.bg }}>
@@ -4384,17 +4400,53 @@ function KpiSimulatorModule() {
 
       <div style={{ maxWidth: 860, margin: "0 auto", padding: "16px 12px" }}>
 
+        {/* Scenario selector */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8, marginBottom: 14 }}>
+          {[
+            { id: "backorder", title: "1) Back-Order", desc: "Item is not on stock", color: T.blue },
+            { id: "nextday", title: "2a) All Items on Stock – Next-Day", desc: "Today Must Order", color: T.green },
+            { id: "standard", title: "2b) All Items on Stock – Standard", desc: "Today Can Order", color: "#7c3aed" },
+          ].map(opt => {
+            const active = scenario === opt.id;
+            return (
+              <button
+                key={opt.id}
+                onClick={() => setScenario(opt.id)}
+                style={{
+                  textAlign: "left",
+                  padding: "11px 12px",
+                  borderRadius: "var(--radius-md)",
+                  border: `1.5px solid ${active ? opt.color : T.border}`,
+                  background: active ? `${opt.color}14` : T.surface,
+                  boxShadow: active ? "var(--shadow-sm)" : "none",
+                  color: T.text,
+                  cursor: "pointer",
+                }}
+              >
+                <div style={{ fontSize: 12, fontWeight: 900, color: active ? opt.color : T.text, fontFamily: T.fontDisplay }}>{opt.title}</div>
+                <div style={{ fontSize: 10, color: T.textLight, marginTop: 3 }}>{opt.desc}</div>
+              </button>
+            );
+          })}
+        </div>
+
+        <div style={{ marginBottom: 12, padding: "10px 12px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: "var(--radius-md)", fontSize: 11, color: T.textMed, lineHeight: 1.5 }}>
+          {isBackOrder && "Back-Order keeps the original simulation: inbound scan must happen before 14:00, PGI before Day 0 departure."}
+          {isNextDay && "Next-Day: Delivery Note Creation before 14:00 must reach WSP / PGI on Day 0. After 14:00, the WSP window runs until Day 1 18:00 and CTE starts from Day 1 departure."}
+          {isStandard && "Standard: regardless of the Day 0 creation time, the WSP window runs until Day 1 18:00 and CTE starts from Day 1 departure."}
+        </div>
+
         {/* Sliders */}
         <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }} className="slider-stack">
           <SliderCard kd={KPI_DEFS[0]} value={inboundI} min={INBOUND_MIN} max={INBOUND_MAX} onChange={setInboundI} />
           <SliderCard kd={KPI_DEFS[1]} value={pgiI}     min={PGI_MIN}     max={PGI_MAX}     onChange={setPgiI} clampedMin={minPgiI} />
-          <SliderCard kd={KPI_DEFS[2]} value={podI}     min={POD_MIN}     max={POD_MAX}     onChange={(v) => setPodI(Math.min(v, toInt(pgiAfterDeparture ? d2h(23) : d1h(23))))} />
+          <SliderCard kd={KPI_DEFS[2]} value={podI}     min={POD_MIN}     max={POD_MAX}     onChange={(v) => setPodI(Math.min(v, toInt((pgiAfterDeparture || cteWindowStart === DAY1_DEPARTURE) ? d2h(23) : d1h(23))))} />
         </div>
 
         {/* CTE extension notice */}
-        {pgiAfterDeparture && (
+        {(pgiAfterDeparture || cteWindowStart === DAY1_DEPARTURE) && (
           <div style={{ marginBottom: 10, padding: "8px 12px", background: "#fff3e0", border: `1px solid ${T.amberBorder}`, borderLeft: `3px solid ${T.amber}`, borderRadius: "var(--radius-md)", fontSize: 11, color: T.amber, fontWeight: 600 }}>
-            🚛 PGI after 18:00 — carrier departs next day. CTE window extended +24h to Day 2 23:59.
+            🚛 CTE starts from the valid departure window. For late Next-Day or Standard deliveries this means Day 1 departure and a Day 2 delivery window.
           </div>
         )}
 
