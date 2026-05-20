@@ -4122,16 +4122,27 @@ function KpiSimulatorModule() {
   const isNextDay   = scenario === "nextday";
   const isStandard  = scenario === "standard";
 
-  // State in integer steps of 0.5h = 30min (×2)
-  // Inbound: 06:00–20:00 Day 0 (slider range wider than window)
-  // PGI:     08:00–23:00 Day 0 (wider than 18:00 window)
-  // POD:     00:00–23:00 Day 1 (wider when CTE extends)
-  const toInt   = (pos) => Math.round(pos * 2);
-  const fromInt = (i)   => i / 2;
+  // State in real one-hour steps, displayed at the end of the hour bucket (:30)
+  // Example: value 13 = Day 0 · 13:30, value 14 = Day 0 · 14:30
+  // Day 0 values: 0–23, Day 1 values: 24–47, Day 2 values: 48–71
+  const absHourFromPos = (pos) => {
+    if (pos <= 6) return (pos / 6) * 24;
+    if (pos <= 9) return 24 + ((pos - 6) / 3) * 24;
+    return 48 + ((pos - 9) / 2) * 24;
+  };
 
-  const [inboundI, setInboundI] = useState(toInt(d0h(8)));   // 08:00
-  const [pgiI,     setPgiI]     = useState(toInt(d0h(15)));  // 15:00
-  const [podI,     setPodI]     = useState(toInt(d1h(12)));  // Day 1 12:00
+  const posFromAbsHour = (absHour) => {
+    if (absHour < 24) return d0h(absHour);
+    if (absHour < 48) return d1h(absHour - 24);
+    return d2h(absHour - 48);
+  };
+
+  const toInt = (pos) => Math.round(absHourFromPos(pos) - 0.5);
+  const fromInt = (i) => posFromAbsHour(i + 0.5);
+
+  const [inboundI, setInboundI] = useState(8);   // Day 0 · 08:30
+  const [pgiI,     setPgiI]     = useState(15);  // Day 0 · 15:30
+  const [podI,     setPodI]     = useState(36);  // Day 1 · 12:30
 
   const ip  = fromInt(inboundI);
   const THROUGHPUT = 3 * 0.25; // 3h × 0.25 pos/h = 0.75 pos
@@ -4143,14 +4154,15 @@ function KpiSimulatorModule() {
   // KPI status per scenario
   let sdpaFail = false;
   let wspFail = false;
-  let pgiAfterDeparture = false;
+  let pgiAfterDeparture = false; // missed the operational departure / future OTS gap
   let cteWindowStart = DEPARTURE;
   let cteWindowEnd = DAY1_END;
 
   if (isBackOrder) {
     sdpaFail = ip >= CUTOFF;
-    wspFail = pp >= DEPARTURE;
     pgiAfterDeparture = pp >= DEPARTURE;
+    // Current WSP measures until 23:59, not against the 18:00 truck departure.
+    wspFail = pp >= DAY1_END;
     cteWindowStart = DEPARTURE;
     cteWindowEnd = pgiAfterDeparture ? DAY2_END : DAY1_END;
   }
@@ -4158,27 +4170,28 @@ function KpiSimulatorModule() {
   if (isNextDay) {
     const createdBeforeCutoff = ip <= CUTOFF;
     if (createdBeforeCutoff) {
-      wspFail = pp >= DEPARTURE;
       pgiAfterDeparture = pp >= DEPARTURE;
+      wspFail = pp >= DAY1_END;
       cteWindowStart = DEPARTURE;
       cteWindowEnd = pgiAfterDeparture ? DAY2_END : DAY1_END;
     } else {
-      wspFail = pp >= DAY1_DEPARTURE;
       pgiAfterDeparture = pp >= DAY1_DEPARTURE;
+      wspFail = pp >= DAY2_END;
       cteWindowStart = DAY1_DEPARTURE;
       cteWindowEnd = DAY2_END;
     }
   }
 
   if (isStandard) {
-    wspFail = pp >= DAY1_DEPARTURE;
     pgiAfterDeparture = pp >= DAY1_DEPARTURE;
+    wspFail = pp >= DAY2_END;
     cteWindowStart = DAY1_DEPARTURE;
     cteWindowEnd = DAY2_END;
   }
 
   const cteFail = pod >= cteWindowEnd;
-  const otifFail = sdpaFail || wspFail || cteFail;
+  const otsFail = pgiAfterDeparture;
+  const otifFail = sdpaFail || otsFail || wspFail || cteFail;
 
   // Timeline total depends on whether CTE window extends
   const TOTAL = pgiAfterDeparture ? 11 : 9;
@@ -4236,14 +4249,14 @@ function KpiSimulatorModule() {
       dotPos: pp, fail: wspFail, clamped: pgiClamped,
       dotLabel: posToTime(pp),
       statusNote: wspFail
-        ? isBackOrder
-          ? "After 18:00 Day 0 departure — WSP fails"
-          : "After valid WSP departure window — WSP fails"
-        : pgiClamped
-          ? `⏱ 3h pick-pack time until loading from delivery creation on — earliest: ${posToTime(ip + THROUGHPUT)}`
-          : isBackOrder || (isNextDay && ip <= CUTOFF)
-            ? "Before Day 0 18:00 departure ✓"
-            : "Before Day 1 18:00 departure ✓",
+        ? "After current WSP measurement end — WSP fails"
+        : pgiAfterDeparture
+          ? "After 18:00 departure: current WSP is measured at 23:59, so WSP stays green although OTIF turns red. Future OTS — On-time Shipping closes this gap."
+          : pgiClamped
+            ? `⏱ 3h pick-pack time until loading from delivery creation on — earliest: ${posToTime(ip + THROUGHPUT)}`
+            : isBackOrder || (isNextDay && ip <= CUTOFF)
+              ? "Before Day 0 18:00 departure ✓"
+              : "Before Day 1 18:00 departure ✓",
     },
     {
       id: "CTE",  icon: "📍", color: "#e65100", label: "POD Delivery",
@@ -4266,7 +4279,7 @@ function KpiSimulatorModule() {
 
   function ChartHeader() {
     return (
-      <>
+      <div style={{ marginLeft: 88 }}>
         <div style={{ display: "flex", borderRadius: "var(--radius-md) var(--radius-md) 0 0", overflow: "hidden" }}>
           {DAY_BANDS.map((d, i) => (
             <div key={i} style={{ width: `${((d.to - d.from) / TOTAL) * 100}%`, background: d.bg, borderRight: i < DAY_BANDS.length - 1 ? `2px solid ${d.border}` : undefined, padding: "6px 0", display: "flex", alignItems: "center", justifyContent: "center", gap: 5, flexShrink: 0 }}>
@@ -4289,7 +4302,7 @@ function KpiSimulatorModule() {
             </div>
           ))}
         </div>
-      </>
+      </div>
     );
   }
 
@@ -4336,7 +4349,7 @@ function KpiSimulatorModule() {
           <div style={{ position: "absolute", left: `${lp + wp}%`, top: 0, bottom: 0, width: 2, background: kd.color, opacity: 0.4, zIndex: 3 }} />
           {/* 3h throughput blocked zone on WSP */}
           {kd.clamped && kd.id === "WSP" && (() => {
-            const minL = Math.min((minPgiI / 40 / TOTAL) * 100, 100);
+            const minL = Math.min((fromInt(minPgiI) / TOTAL) * 100, 100);
             const startL = (kd.from / TOTAL) * 100;
             return (
               <div style={{ position: "absolute", left: `${startL}%`, width: `${minL - startL}%`, top: 0, bottom: 0, background: "repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(245,158,11,0.15) 4px,rgba(245,158,11,0.15) 8px)", borderRight: `2px dashed ${T.amber}`, zIndex: 3 }}>
@@ -4371,7 +4384,12 @@ function KpiSimulatorModule() {
             {kd.dotLabel}
           </span>
         </div>
-        <input type="range" min={min} max={max} value={value} onChange={e => onChange(+e.target.value)}
+        {kd.id === "SDPA" && (
+          <div style={{ fontSize: 9, color: T.textLight, margin: "-2px 0 5px 21px", lineHeight: 1.25 }}>
+            Inbound Scan will trigger delivery note creation as today must
+          </div>
+        )}
+        <input type="range" min={min} max={max} step={1} value={value} onChange={e => onChange(+e.target.value)}
           style={{ width: "100%", accentColor: isClamped ? T.amber : kd.color, cursor: "pointer" }} />
         <div style={{ fontSize: 9.5, color: isClamped ? T.amber : dotColor, marginTop: 4, fontWeight: 600, lineHeight: 1.3 }}>
           {kd.statusNote}
@@ -4380,13 +4398,13 @@ function KpiSimulatorModule() {
     );
   }
 
-  // Slider ranges in same integer units (×40)
-  const INBOUND_MIN = toInt(d0h(6));   // 06:00
-  const INBOUND_MAX = toInt(d0h(20));  // 20:00 — wider than 14:00 window so dot can go outside
-  const PGI_MIN     = toInt(d0h(8));   // 08:00
-  const PGI_MAX     = toInt(isBackOrder ? d0h(23) : d1h(23));  // wider than the active WSP window
-  const POD_MIN     = toInt(d1h(0));   // Day 1 00:00
-  const POD_MAX     = toInt((pgiAfterDeparture || cteWindowStart === DAY1_DEPARTURE) ? d2h(23) : d1h(23)); // Day 1 or Day 2 23:00
+  // Slider ranges in absolute hour buckets shown as :30 times
+  const INBOUND_MIN = 6;   // Day 0 · 06:30
+  const INBOUND_MAX = 20;  // Day 0 · 20:30
+  const PGI_MIN     = 8;   // Day 0 · 08:30
+  const PGI_MAX     = isBackOrder ? 23 : 47;  // Day 0 · 23:30 or Day 1 · 23:30
+  const POD_MIN     = 24;  // Day 1 · 00:30
+  const POD_MAX     = (pgiAfterDeparture || cteWindowStart === DAY1_DEPARTURE) ? 71 : 47; // Day 2 · 23:30 or Day 1 · 23:30
 
   return (
     <div style={{ minHeight: "calc(100vh - 56px)", background: T.bg }}>
@@ -4431,7 +4449,7 @@ function KpiSimulatorModule() {
         </div>
 
         <div style={{ marginBottom: 12, padding: "10px 12px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: "var(--radius-md)", fontSize: 11, color: T.textMed, lineHeight: 1.5 }}>
-          {isBackOrder && "Back-Order keeps the original simulation: inbound scan must happen before 14:00, PGI before Day 0 departure."}
+          {isBackOrder && "Back-Order keeps the original simulation: inbound scan triggers delivery note creation as Today Must; operational departure target is Day 0 18:00."}
           {isNextDay && "Next-Day: Delivery Note Creation before 14:00 must reach WSP / PGI on Day 0. After 14:00, the WSP window runs until Day 1 18:00 and CTE starts from Day 1 departure."}
           {isStandard && "Standard: regardless of the Day 0 creation time, the WSP window runs until Day 1 18:00 and CTE starts from Day 1 departure."}
         </div>
@@ -4440,7 +4458,7 @@ function KpiSimulatorModule() {
         <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }} className="slider-stack">
           <SliderCard kd={KPI_DEFS[0]} value={inboundI} min={INBOUND_MIN} max={INBOUND_MAX} onChange={setInboundI} />
           <SliderCard kd={KPI_DEFS[1]} value={pgiI}     min={PGI_MIN}     max={PGI_MAX}     onChange={setPgiI} clampedMin={minPgiI} />
-          <SliderCard kd={KPI_DEFS[2]} value={podI}     min={POD_MIN}     max={POD_MAX}     onChange={(v) => setPodI(Math.min(v, toInt((pgiAfterDeparture || cteWindowStart === DAY1_DEPARTURE) ? d2h(23) : d1h(23))))} />
+          <SliderCard kd={KPI_DEFS[2]} value={podI}     min={POD_MIN}     max={POD_MAX}     onChange={(v) => setPodI(Math.min(v, POD_MAX))} />
         </div>
 
         {/* CTE extension notice */}
@@ -4471,6 +4489,26 @@ function KpiSimulatorModule() {
             </div>
             {/* KPI bars */}
             {KPI_DEFS.map(kd => <KpiBar key={kd.id} kd={kd} />)}
+
+            {/* KPI status overview */}
+            <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8 }}>
+              {[
+                { label: KPI_DEFS[0].id, ok: !sdpaFail, note: KPI_DEFS[0].id === "SDPA" ? "Inbound / SDPA" : "Creation" },
+                { label: "WSP", ok: !wspFail, note: "Current 23:59 logic" },
+                { label: "OTS", ok: !otsFail, note: "Future on-time shipping" },
+                { label: "CTE", ok: !cteFail, note: "Transport promise" },
+                { label: "OTIF", ok: !otifFail, note: "End-to-end promise" },
+              ].map(kpi => (
+                <div key={kpi.label} style={{ padding: "8px 9px", borderRadius: "var(--radius-md)", background: kpi.ok ? T.greenLight : T.redLight, border: `1px solid ${kpi.ok ? T.greenBorder : T.redBorder}` }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 900, color: kpi.ok ? T.green : T.red, fontFamily: T.fontMono }}>{kpi.label}</span>
+                    <span style={{ fontSize: 10, fontWeight: 900, color: kpi.ok ? T.green : T.red }}>{kpi.ok ? "🟢 Green" : "🔴 Red"}</span>
+                  </div>
+                  <div style={{ fontSize: 8.5, color: T.textLight, marginTop: 3, lineHeight: 1.25 }}>{kpi.note}</div>
+                </div>
+              ))}
+            </div>
+
             {/* Legend + reset */}
             <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 10, flexWrap: "wrap" }}>
               {[[T.green,"✓","OK — inside window"],[T.red,"✗","FAIL — outside window"]].map(([col, icon, lbl]) => (
@@ -4481,7 +4519,7 @@ function KpiSimulatorModule() {
                   {lbl}
                 </div>
               ))}
-              <button onClick={() => { setInboundI(toInt(d0h(8))); setPgiI(toInt(d0h(15))); setPodI(toInt(d1h(12))); }}
+              <button onClick={() => { setInboundI(8); setPgiI(15); setPodI(36); }}
                 style={{ marginLeft: "auto", padding: "5px 12px", borderRadius: "var(--radius-md)", border: `1px solid ${T.border}`, background: T.surface, color: T.textMed, fontSize: 11, cursor: "pointer", fontFamily: T.fontSans, fontWeight: 600 }}>
                 ↺ Reset
               </button>
