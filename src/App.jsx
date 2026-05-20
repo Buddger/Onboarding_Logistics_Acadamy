@@ -4108,7 +4108,9 @@ function KpiSimulatorModule() {
   const d1h = (h) => 6 + (h / 24) * 3;      // Day 1 hour → pos
   const d2h = (h) => 9 + (h / 24) * 2;      // Day 2 hour → pos
 
-  // Fixed KPI window boundaries
+  const [scenario, setScenario] = useState("backorder");
+
+  // KPI window boundaries
   const SDPA_WINDOW_END = d0h(14);   // 14:00 Day 0
   const DEPARTURE       = d0h(18);   // 18:00 Day 0
   const DAY1_END        = 9;         // 23:59 Day 1
@@ -4132,13 +4134,44 @@ function KpiSimulatorModule() {
   const pp         = fromInt(effPgiI);
   const pod        = fromInt(podI);
 
-  // KPI status
-  const sdpaFail          = ip  >= SDPA_WINDOW_END;
-  const wspFail           = pp  >= DEPARTURE;
-  const pgiAfterDeparture = pp  >= DEPARTURE;
-  const cteWindowEnd      = pgiAfterDeparture ? DAY2_END : DAY1_END;
-  const cteFail           = pod >= cteWindowEnd;
-  const otifFail          = sdpaFail || wspFail || cteFail;
+  // ─────────────────────────────────────────────────────
+  // Scenario KPI Logic
+  // ─────────────────────────────────────────────────────
+
+  let sdpaFail = false;
+  let wspFail = false;
+  let pgiAfterDeparture = false;
+  let cteWindowEnd = DAY1_END;
+
+  if (isBackOrder) {
+    sdpaFail = ip >= CUTOFF;
+    wspFail = pp >= DEPARTURE;
+    pgiAfterDeparture = pp >= DEPARTURE;
+    cteWindowEnd = pgiAfterDeparture ? DAY2_END : DAY1_END;
+  }
+
+  if (isNextDay) {
+    const createdBeforeCutoff = ip <= CUTOFF;
+
+    if (createdBeforeCutoff) {
+      wspFail = pp >= DEPARTURE;
+      pgiAfterDeparture = pp >= DEPARTURE;
+      cteWindowEnd = pgiAfterDeparture ? DAY2_END : DAY1_END;
+    } else {
+      wspFail = pp >= d1h(18);
+      pgiAfterDeparture = pp >= d1h(18);
+      cteWindowEnd = DAY2_END;
+    }
+  }
+
+  if (isStandard) {
+    wspFail = pp >= d1h(18);
+    pgiAfterDeparture = pp >= d1h(18);
+    cteWindowEnd = DAY2_END;
+  }
+
+  const cteFail = pod >= cteWindowEnd;
+  const otifFail = sdpaFail || wspFail || cteFail;
 
   // Timeline total depends on whether CTE window extends
   const TOTAL = pgiAfterDeparture ? 11 : 9;
@@ -4177,7 +4210,7 @@ function KpiSimulatorModule() {
 
   const KPI_DEFS = [
     {
-      id: "SDPA", icon: "🚛", color: "#0097a7", label: "Inbound Scan",
+      id: "SDPA", icon: "🚛", color: "#0097a7", label: scenario === "backorder" ? "Inbound Scan" : "Delivery Note Creation",
       from: d0h(6), to: SDPA_WINDOW_END,
       dotPos: ip, fail: sdpaFail,
       dotLabel: posToTime(ip),
@@ -4189,7 +4222,11 @@ function KpiSimulatorModule() {
       dotPos: pp, fail: wspFail, clamped: pgiClamped,
       dotLabel: posToTime(pp),
       statusNote: wspFail
-        ? "After 18:00 departure — WSP fails"
+        ? scenario === "backorder"
+          ? "After 18:00 Day 0 departure — WSP fails"
+          : scenario === "nextday"
+            ? "Missed valid departure window — WSP fails"
+            : "After Day 1 departure — WSP fails"
         : pgiClamped
           ? `⏱ 3h cycle time — earliest: ${posToTime(ip + THROUGHPUT)}`
           : "Before 18:00 departure ✓",
